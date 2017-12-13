@@ -123,10 +123,12 @@ void UpdateLaunchDimensions(const LaunchDimensions& launch_dims, Thunk* thunk,
   llvm::ConstantInt* threads_per_block_ir_value = llvm::ConstantInt::get(
       llvm::IntegerType::get(llvm_context, /*NumBits=*/32),
       launch_dims.threads_per_block());
+  // Our launch bounds are exact, so we can specify them as reqntidx rather than
+  // maxntidx.
   nvvm_annotations_node->addOperand(llvm::MDNode::get(
       llvm_context,
       {llvm::ConstantAsMetadata::get(ir_kernel),
-       llvm::MDString::get(llvm_context, "maxntidx"),
+       llvm::MDString::get(llvm_context, "reqntidx"),
        llvm::ConstantAsMetadata::get(threads_per_block_ir_value)}));
 }
 }  // namespace
@@ -257,6 +259,11 @@ Status IrEmitterUnnested::HandleDot(HloInstruction* dot) {
   }
   thunk_sequence_->emplace_back(BuildKernelThunk(dot));
   return IrEmitter::HandleDot(dot);
+}
+
+Status IrEmitterUnnested::HandleConditional(HloInstruction* conditional) {
+  thunk_sequence_->push_back(BuildKernelThunk(conditional));
+  return IrEmitter::HandleConditional(conditional);
 }
 
 Status IrEmitterUnnested::HandleConvolution(HloInstruction* convolution) {

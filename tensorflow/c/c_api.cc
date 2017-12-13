@@ -579,6 +579,7 @@ TF_Tensor* TF_TensorFromTensor(const tensorflow::Tensor& src,
       status->status = InvalidArgument(
           "invalid string tensor encoding (string #", i, " of ",
           srcarray.size(), "): ", status->status.error_message());
+      delete[] base;
       return nullptr;
     }
     dst += consumed;
@@ -588,6 +589,7 @@ TF_Tensor* TF_TensorFromTensor(const tensorflow::Tensor& src,
     status->status = InvalidArgument(
         "invalid string tensor encoding (decoded ", (dst - base),
         " bytes, but the tensor is encoded in ", size, " bytes");
+    delete[] base;
     return nullptr;
   }
 
@@ -1848,6 +1850,16 @@ void TF_DeleteImportGraphDefOptions(TF_ImportGraphDefOptions* opts) {
 void TF_ImportGraphDefOptionsSetPrefix(TF_ImportGraphDefOptions* opts,
                                        const char* prefix) {
   opts->opts.prefix = prefix;
+}
+
+void TF_ImportGraphDefOptionsSetUniquifyNames(TF_ImportGraphDefOptions* opts,
+                                              unsigned char uniquify_names) {
+  opts->opts.uniquify_names = uniquify_names;
+}
+
+void TF_ImportGraphDefOptionsSetUniquifyPrefix(TF_ImportGraphDefOptions* opts,
+                                               unsigned char uniquify_prefix) {
+  opts->opts.uniquify_prefix = uniquify_prefix;
 }
 
 void TF_ImportGraphDefOptionsAddInputMapping(TF_ImportGraphDefOptions* opts,

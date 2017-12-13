@@ -48,6 +48,7 @@ from tensorflow.python.framework import op_def_registry
 from tensorflow.python.framework import registry
 from tensorflow.python.framework import tensor_shape
 from tensorflow.python.framework import versions
+from tensorflow.python.ops import control_flow_util
 from tensorflow.python.platform import app
 from tensorflow.python.platform import tf_logging as logging
 from tensorflow.python.util import compat
@@ -495,7 +496,17 @@ class Tensor(_TensorLike):
     Returns:
       A list of `Operation`s.
     """
-    return self._consumers
+    if self._op._c_op:  # pylint: disable=protected-access
+      consumer_names = c_api.TF_OperationOutputConsumers_wrapper(
+          self._as_tf_output())
+      # pylint: disable=protected-access
+      return [
+          self.graph._get_operation_by_name_unsafe(name)
+          for name in consumer_names
+      ]
+      # pylint: enable=protected-access
+    else:
+      return self._consumers
 
   def _add_consumer(self, consumer):
     """Add a consumer to this tensor.
@@ -506,6 +517,9 @@ class Tensor(_TensorLike):
     Raises:
       TypeError: if the consumer is not an Operation.
     """
+    # pylint: disable=protected-access
+    assert not self._op._c_op, "Tensor._add_consumer doesn't work with C API"
+    # pylint: enable=protected-access
     if not isinstance(consumer, Operation):
       raise TypeError("Consumer must be an Operation: %s" % consumer)
     self._consumers.append(consumer)
@@ -671,8 +685,8 @@ class _EagerTensorBase(Tensor):
   def __float__(self):
     return float(self.numpy())
 
-  def __array__(self):
-    return np.array(self.numpy())
+  def __array__(self, dtype=None):
+    return np.array(self.numpy(), dtype=dtype)
 
   def __format__(self, format_spec):
     return self.numpy().__format__(format_spec)
@@ -965,7 +979,7 @@ def internal_convert_to_tensor(value,
     # Fast path for EagerTensors that don't need any conversion.
     if isinstance(value, EagerTensor):
       # Note that we don't check that value's dtype matches the dtype
-      # argument.  We exepct that the C runtime will do that checking
+      # argument.  We expect that the C runtime will do that checking
       # when we execute the kernel.
       return value
 
@@ -1605,6 +1619,7 @@ class Operation(object):
                           "a Tensor, or IndexedSlices: %s" % c)
         self._control_inputs.append(control_op)
 
+    self._id_value = self._graph._next_id()  # pylint: disable=protected-access
     self._original_op = original_op
     self._op_def = op_def
     self._traceback = self._graph._extract_stack()  # pylint: disable=protected-access
@@ -1630,9 +1645,11 @@ class Operation(object):
     else:
       self._c_op = None
 
-    # Mark that we consume the inputs.
-    for input_tensor in self.inputs:
-      input_tensor._add_consumer(self)  # pylint: disable=protected-access
+    # Mark that we consume the inputs. This is unnecessary and unsupported with
+    # the C API enabled, since the C API tracks the tensor consumers instead.
+    if not self._c_op:
+      for input_tensor in self.inputs:
+        input_tensor._add_consumer(self)  # pylint: disable=protected-access
 
     # Initialize self._outputs.
     if self._c_op:
@@ -1651,14 +1668,10 @@ class Operation(object):
 
     # Add this op to the current control flow context.
     self._control_flow_context = g._get_control_flow_context()  # pylint: disable=protected-access
+    for input_tensor in self.inputs:
+      control_flow_util.CheckInputFromValidContext(self, input_tensor.op)
     if self._control_flow_context is not None:
       self._control_flow_context.AddOp(self)
-    # NOTE(keveman): Control flow context's AddOp could be creating new ops and
-    # setting op.inputs[index] = new_op. Thus the new ops' id could be larger
-    # than this op's id even though this op depend on them. Therefore, delaying
-    # assigning id to this op until all ops this could be dependent on are
-    # created.
-    self._id_value = self._graph._next_id()  # pylint: disable=protected-access
     self._recompute_node_def()
 
   def _reconstruct_sequence_inputs(self, op_def, inputs, attrs):
@@ -1926,6 +1939,13 @@ class Operation(object):
       c_api.AddControlInput(self._graph._c_graph, self._c_op, op._c_op)  # pylint: disable=protected-access
     else:
       self._add_control_inputs([op])
+
+  def _remove_all_control_inputs(self):
+    """Removes any control inputs to this operation."""
+    if self._c_op:
+      c_api.RemoveAllControlInputs(self._graph._c_graph, self._c_op)  # pylint: disable=protected-access
+    else:
+      del self.control_inputs[:]
 
   # Methods below are used when building the NodeDef and Graph proto.
   def _recompute_node_def(self):
@@ -2888,6 +2908,20 @@ class Graph(object):
     """
     self._control_flow_context = ctx
 
+  def _copy_functions_to_graph_def(self, graph_def, starting_bytesize):
+    """If this graph contains functions, copy them to `graph_def`."""
+    bytesize = starting_bytesize
+    for f in self._functions.values():
+      bytesize += f.definition.ByteSize()
+      if bytesize >= (1 << 31) or bytesize < 0:
+        raise ValueError("GraphDef cannot be larger than 2GB.")
+      graph_def.library.function.extend([f.definition])
+      if f.grad_func_name:
+        grad_def = function_pb2.GradientDef()
+        grad_def.function_name = f.name
+        grad_def.gradient_func = f.grad_func_name
+        graph_def.library.gradient.extend([grad_def])
+
   def _as_graph_def(self, from_version=None, add_shapes=False):
     # pylint: disable=line-too-long
     """Returns a serialized `GraphDef` representation of this graph.
@@ -2931,17 +2965,7 @@ class Graph(object):
           bytesize += op.node_def.ByteSize()
           if bytesize >= (1 << 31) or bytesize < 0:
             raise ValueError("GraphDef cannot be larger than 2GB.")
-      if self._functions:
-        for f in self._functions.values():
-          bytesize += f.definition.ByteSize()
-          if bytesize >= (1 << 31) or bytesize < 0:
-            raise ValueError("GraphDef cannot be larger than 2GB.")
-          graph.library.function.extend([f.definition])
-          if f.grad_func_name:
-            grad_def = function_pb2.GradientDef()
-            grad_def.function_name = f.name
-            grad_def.gradient_func = f.grad_func_name
-            graph.library.gradient.extend([grad_def])
+      self._copy_functions_to_graph_def(graph, bytesize)
       return graph, self._version
 
   def as_graph_def(self, from_version=None, add_shapes=False):
@@ -3159,6 +3183,14 @@ class Graph(object):
     input_ops = set(self._get_operation_by_tf_operation(output.oper)
                     for output in tf_outputs)
     control_inputs = self._control_dependencies_for_inputs(input_ops)
+
+    # Update _names_in_use before calling the Operation constructor since the
+    # control flow code may create more Operations, and we don't want the names
+    # to conflict.
+    op_name = c_api.TF_OperationName(c_op)
+    assert op_name not in self._names_in_use
+    self._names_in_use[op_name] = 1
+
     ret = Operation(c_op, self, control_inputs=control_inputs)
     self._create_op_helper(ret, compute_device=compute_device)
     return ret
@@ -5320,11 +5352,18 @@ class name_scope(object):  # pylint: disable=invalid-name
     """
     if self._in_eager_mode:
       self._old_name = self._ctx.scope_name
-      if self._name:
-        scope_name = (self._old_name + self._name + "/"
-                      if self._old_name else self._name + "/")
-      else:
+      if not self._name:
         scope_name = ""
+      else:
+        if self._name[-1] == "/":
+          # A trailing slash breaks out of nested name scopes, indicating a
+          # fully specified scope name, for compatibility with Graph.name_scope.
+          scope_name = self._name
+        else:
+          name_with_trailing_slash = self._name + "/"
+          scope_name = (
+              self._old_name + name_with_trailing_slash
+              if self._old_name else name_with_trailing_slash)
       self._ctx.scope_name = scope_name
       return scope_name
     else:
