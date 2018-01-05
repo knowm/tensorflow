@@ -23,8 +23,11 @@ do
     esac
 done
 
-#bazel clean
-#./configure
+mkdir /tmp/tensorflow_pkg
+chmod 777 /tmp/tensorflow_pkg
+
+bazel clean
+./configure
 bazel build -c opt $COPT -k //tensorflow/tools/pip_package:build_pip_package
 bazel-bin/tensorflow/tools/pip_package/build_pip_package /tmp/tensorflow_pkg
 
