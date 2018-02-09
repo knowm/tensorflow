@@ -378,6 +378,14 @@ def tf_protos_all():
       extra_deps=tf_protos_all_impl(),
       otherwise=["//tensorflow/core:protos_all_cc"])
 
+def tf_protos_grappler_impl():
+  return ["//tensorflow/core/grappler/costs:op_performance_data_cc_impl"]
+
+def tf_protos_grappler():
+  return if_static(
+      extra_deps=tf_protos_grappler_impl(),
+      otherwise=["//tensorflow/core/grappler/costs:op_performance_data_cc"])
+
 def tf_env_time_hdrs():
   return [
       "platform/env_time.h",
@@ -510,6 +518,7 @@ def tf_additional_cloud_kernel_deps():
 def tf_lib_proto_parsing_deps():
   return [
       ":protos_all_cc",
+      "//third_party/eigen3",
       "//tensorflow/core/platform/default/build_config:proto_parsing",
   ]
 
@@ -530,6 +539,9 @@ def tf_additional_gdr_lib_defines():
       "//tensorflow:with_gdr_support": ["TENSORFLOW_USE_GDR"],
       "//conditions:default": [],
   })
+
+def tf_py_clif_cc(name, visibility=None, **kwargs):
+  pass
 
 def tf_pyclif_proto_library(name, proto_lib, proto_srcfile="", visibility=None,
                             **kwargs):
